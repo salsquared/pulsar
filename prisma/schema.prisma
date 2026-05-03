@@ -1,0 +1,87 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Asset {
+  id          String         @id
+  symbol      String
+  name        String
+  assetClass  AssetClass
+  source      String
+  active      Boolean        @default(true)
+  priceTicks  PriceTick[]
+  dailySums   DailySummary[]
+}
+
+model PriceTick {
+  id        Int      @id @default(autoincrement())
+  assetId   String
+  asset     Asset    @relation(fields: [assetId], references: [id])
+  timestamp DateTime
+  open      Float?
+  high      Float?
+  low       Float?
+  close     Float
+  volume    Float?
+  source    String
+
+  @@unique([assetId, timestamp, source])
+  @@index([assetId, timestamp])
+}
+
+model DailySummary {
+  id      Int      @id @default(autoincrement())
+  assetId String
+  asset   Asset    @relation(fields: [assetId], references: [id])
+  date    DateTime
+  open    Float
+  high    Float
+  low     Float
+  close   Float
+  volume  Float?
+
+  @@unique([assetId, date])
+  @@index([assetId, date])
+}
+
+model MacroSeries {
+  id        Int      @id @default(autoincrement())
+  seriesId  String
+  name      String
+  value     Float
+  timestamp DateTime
+  source    String
+
+  @@unique([seriesId, timestamp])
+  @@index([seriesId, timestamp])
+}
+
+model IngestJob {
+  id           Int       @id @default(autoincrement())
+  sourceId     String
+  startedAt    DateTime
+  completedAt  DateTime?
+  status       JobStatus
+  rowsInserted Int       @default(0)
+  errorMsg     String?
+}
+
+enum AssetClass {
+  CRYPTO
+  EQUITY
+  FOREX
+  COMMODITY
+  MACRO
+}
+
+enum JobStatus {
+  RUNNING
+  SUCCESS
+  PARTIAL
+  FAILED
+}

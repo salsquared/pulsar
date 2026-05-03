@@ -6,6 +6,27 @@ References to the architecture doc use the form `[architecture § Section]`. The
 
 ---
 
+## Progress
+
+Update this table and the phase heading when a phase is complete.
+
+| Phase | Status | Notes |
+|:---|:---|:---|
+| 0 — Bootstrap | ✅ done | `npm run dev` + `/health` verified |
+| 1 — Schema, Prisma, seed | ✅ done | WAL confirmed, 21 curated assets seeded |
+| 2 — Core libs | ✅ done | 16/16 smoke tests passing |
+| 3 — CoinGecko + pipeline | ✅ done | 100 crypto ticks flowing, dedup via `INSERT OR IGNORE` |
+| 4 — REST skeleton | ✅ done | `/assets` `/prices` `/status` `/health` with `X-Cache` headers |
+| 5 — History + backfill | ⬜ todo | |
+| 6 — Remaining fetchers + macro | ⬜ todo | |
+| 7 — WebSocket + notify | ⬜ todo | |
+| 8 — Manual ingest trigger | ⬜ todo | |
+| 9 — Downsampling + retention | ⬜ todo | |
+| 10 — PM2 ecosystem | ⬜ todo | |
+| 11 — Mission Control migration | ⬜ todo | |
+
+---
+
 ## How to read this plan
 
 - **Phases** are sequenced by dependency. Each ends with a "Done when" milestone.
@@ -15,7 +36,7 @@ References to the architecture doc use the form `[architecture § Section]`. The
 
 ---
 
-## Phase 0 — Project bootstrap
+## Phase 0 — Project bootstrap ✅
 
 **Goal:** repo is runnable. `npm run dev` starts a Hono server that responds 200 on `/health`.
 
@@ -38,9 +59,11 @@ References to the architecture doc use the form `[architecture § Section]`. The
 
 **Done when:** the verify step passes on a fresh clone.
 
+> **Implementation notes:** `npm run dev` uses `node --env-file .env.development --import tsx/esm --watch`. Neither `.env.development` nor `.env.production` is committed — copy from `.env.development.example` / `.env.production.example`.
+
 ---
 
-## Phase 1 — Schema, Prisma client, seed
+## Phase 1 — Schema, Prisma client, seed ✅
 
 **Goal:** DB exists with WAL mode set on every connection; the curated `Asset` seed list is loaded.
 
@@ -58,9 +81,11 @@ References to the architecture doc use the form `[architecture § Section]`. The
 
 **Done when:** verify passes; re-running the seed produces zero new rows.
 
+> **Implementation notes:** `$executeRawUnsafe` fails for result-returning PRAGMAs in Prisma 6 — use `$queryRawUnsafe` for all three WAL pragmas. SQLite path resolves relative to `prisma/schema.prisma`, so `DATABASE_URL=file:./dev.db` places the DB at `prisma/dev.db`.
+
 ---
 
-## Phase 2 — Core libs (types, logger, cache, auth, errors)
+## Phase 2 — Core libs (types, logger, cache, auth, errors) ✅
 
 **Goal:** every utility every later phase depends on is in place.
 
@@ -86,9 +111,11 @@ References to the architecture doc use the form `[architecture § Section]`. The
 
 **Done when:** smoke script prints all green.
 
+> **Implementation notes:** `withCache` stores raw data (not a `Response`) and builds the response itself — this is the only way `X-Cache` headers land in the actual response. If `fn()` returns a `Response` instance (e.g. `apiError`), it is passed through without caching.
+
 ---
 
-## Phase 3 — Source registry, CoinGecko fetcher, pipeline, ingest entry point
+## Phase 3 — Source registry, CoinGecko fetcher, pipeline, ingest entry point ✅
 
 **Goal:** end-to-end ingest works for one source via `SOURCE_ID=coingecko npx tsx src/ingest/run.ts`. Crypto tick rows appear in the DB; `IngestJob` row is written.
 
@@ -119,9 +146,11 @@ References to the architecture doc use the form `[architecture § Section]`. The
 
 **Done when:** verify is deterministic. Multiple back-to-back runs do not duplicate rows.
 
+> **Implementation notes:** Prisma 6 removed `skipDuplicates` for SQLite `createMany` — replaced with `INSERT OR IGNORE` via `$executeRawUnsafe`, batched at 124 rows (floor(999 params / 8 cols)). Same fix applied to `MacroSeries` inserts. `PROC` env var must be set *before* the first logger import so every log line is tagged.
+
 ---
 
-## Phase 4 — REST API skeleton (assets, prices, status, health)
+## Phase 4 — REST API skeleton (assets, prices, status, health) ✅
 
 **Goal:** API serves the basic public endpoints with the cache wrapper. Mission Control could already start consuming `/prices/latest` for crypto.
 
@@ -155,6 +184,8 @@ References to the architecture doc use the form `[architecture § Section]`. The
    - `mv prisma/dev.db /tmp/`, hit `/health` again → 503; restore the file.
 
 **Done when:** every endpoint returns the architecture-locked shape; cache headers behave correctly; `/health` distinguishes ok vs degraded.
+
+> **Implementation notes:** `withCache` route handlers return raw data objects (not `c.json(...)`) — `withCache` builds the `Response` itself to control the `X-Cache` header. Routes that call `apiError` inside the cache callback return a `Response` instance; `withCache` detects this and passes it through without caching.
 
 ---
 

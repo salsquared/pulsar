@@ -986,9 +986,10 @@ pulsar/
 ├── scripts/                  # one-off scripts (backfills, DB inspection) run via `npx tsx`
 ├── docs/
 │   └── architecture.md       # this file
-├── .env                      # API keys + PULSAR_INTERNAL_TOKEN (untracked)
-├── .env.development          # DATABASE_URL only (committed)
-├── .env.production           # DATABASE_URL only (committed)
+├── .env.development          # gitignored — copy from .env.development.example
+├── .env.production           # gitignored — copy from .env.production.example
+├── .env.development.example  # committed template for dev (DATABASE_URL + dev API keys)
+├── .env.production.example   # committed template for prod (DATABASE_URL + prod API keys)
 ├── package.json
 └── tsconfig.json
 ```

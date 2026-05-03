@@ -77,12 +77,13 @@ Scheduling is owned entirely by PM2's `cron_restart` — there is no in-process 
 ### Install and run (dev)
 
 ```bash
+cp .env.development.example .env.development   # fill in API keys + PULSAR_INTERNAL_TOKEN
 npm install
 npx prisma migrate dev          # creates prisma/dev.db
 npm run dev                     # http://localhost:4103
 ```
 
-The dev server uses `tsx` watch mode and reads `.env.development`. To run any source ingest manually in dev:
+The dev server uses `tsx` watch mode and loads `.env.development`. To run any source ingest manually in dev:
 
 ```bash
 SOURCE_ID=coingecko npx tsx src/ingest/run.ts
@@ -151,11 +152,16 @@ Adding a new source = a `SourceConfig` entry in `src/lib/source-registry.ts` plu
 
 ## Configuration
 
-Environment variables are split across two committed files (`DATABASE_URL` only) and one untracked `.env` (everything else).
+Neither `.env.development` nor `.env.production` is committed. Copy the example templates and fill in values:
+
+```bash
+cp .env.development.example .env.development
+cp .env.production.example .env.production
+```
 
 | Var | File | Purpose |
 |:---|:---|:---|
-| `DATABASE_URL` | `.env.development` / `.env.production` | SQLite file path (`file:./prisma/dev.db` or `file:./prisma/prod.db`) |
+| `DATABASE_URL` | `.env.development` / `.env.production` | SQLite file path — `file:./dev.db` or `file:./prod.db` (relative to `prisma/`) |
 | `COINGECKO_API_KEY` | `.env` (untracked) | CoinGecko API key |
 | `ALPHA_VANTAGE_KEY` | `.env` (untracked) | Alpha Vantage API key |
 | `FRED_API_KEY` | `.env` (untracked) | FRED API key |

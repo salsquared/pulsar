@@ -2,10 +2,17 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Implementation tracking
+
+Active implementation follows `docs/implementation-plan.md`. When a phase is completed:
+1. Mark the phase heading with ✅ in `docs/implementation-plan.md`
+2. Update the **Progress** table at the top of that file (status + brief notes)
+3. Add an `> **Implementation notes:**` block after the phase's "Done when" line documenting any deviations from the plan, gotchas encountered, or decisions made during implementation
+
 ## Commands
 
-- `npm run dev` — Hono dev server on **port 4103** with tsx watch mode. Loads `.env.development` (`DATABASE_URL=file:./prisma/dev.db`).
-- `npm run start` — production server on **port 3103**. Loads `.env.production` (`DATABASE_URL=file:./prisma/prod.db`).
+- `npm run dev` — Hono dev server on **port 4103** with tsx watch mode. `DATABASE_URL=file:./dev.db` is baked into the script (resolves to `prisma/dev.db` relative to the schema).
+- `npm run start` — production server on **port 3103**. `DATABASE_URL=file:./prod.db` is baked in (`prisma/prod.db`).
 - `npm run build` — compiles TypeScript to `dist/`.
 - `npm run lint` — ESLint + TypeScript type-check.
 - `npx prisma migrate dev` / `npx prisma generate` — schema at `prisma/schema.prisma` (SQLite). Dev and prod use **separate DB files** (`prisma/dev.db` vs `prisma/prod.db`).
@@ -63,7 +70,14 @@ Prisma migrations are a **deploy-time** step — never run `prisma migrate` from
 
 ### `.env` files
 
-`.env.development` and `.env.production` contain only `DATABASE_URL`. All API keys (`COINGECKO_API_KEY`, `ALPHA_VANTAGE_KEY`, `FRED_API_KEY`, `EXCHANGERATE_API_KEY`) plus the shared internal token (`PULSAR_INTERNAL_TOKEN`, used by ingest jobs to call `/internal/notify` and by operators to call `POST /ingest/:sourceId`) live in an untracked `.env`. Both checked-in env files are committed; the untracked `.env` is not.
+Neither `.env.development` nor `.env.production` is committed — they're gitignored. Copy the committed example templates and fill in values:
+
+```
+cp .env.development.example .env.development
+cp .env.production.example .env.production
+```
+
+Both files contain `DATABASE_URL`, `PULSAR_INTERNAL_TOKEN`, and all API keys. Dev and prod use separate files so they can carry different keys (e.g. free-tier vs paid CoinGecko key). The `.example` files are committed and document what each env needs.
 
 ### Internal endpoints & WebSocket
 
