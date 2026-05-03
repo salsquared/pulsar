@@ -188,6 +188,66 @@ enum JobStatus {
 
 ---
 
+## Asset Registration
+
+Every `PriceTick` and `DailySummary` row foreign-keys back to an `Asset`. Assets are not blindly auto-created from raw fetcher output — that would let a source typo or coverage change silently spawn unintended asset rows. The registry is curated for the stable universe (equities, forex, commodities) and auto-managed for the high-churn case (crypto top-100), with `Asset.source` acting as the canonical primary source for read paths.
+
+### Asset id conventions
+
+Asset ids are stable, human-readable strings shared with API consumers. They follow per-class rules so Mission Control (and any future client) can construct them deterministically:
+
+| Asset class | Format | Examples | Notes |
+|:---|:---|:---|:---|
+| `CRYPTO` | CoinGecko coin id | `bitcoin`, `ethereum`, `solana` | Lowercase, hyphenated — matches CoinGecko's `id` field exactly |
+| `EQUITY` | Uppercase ticker | `AAPL`, `MSFT`, `SPY` | No exchange suffix; Yahoo's index symbols (`^GSPC`, `^DJI`) keep the leading caret |
+| `FOREX` | `BASE/QUOTE` | `EUR/USD`, `GBP/JPY` | Slash-delimited, both sides uppercase ISO 4217 codes |
+| `COMMODITY` | Yahoo futures ticker | `GC=F` (gold), `CL=F` (WTI crude) | As Yahoo Finance returns them |
+| `MACRO` | (n/a) | — | Macro entries live in `MacroSeries`, not `Asset`; ids are FRED series codes (`FEDFUNDS`, `CPIAUCSL`) |
+
+The `Asset.symbol` field carries the short display form (`BTC`, `AAPL`, `EURUSD`); `id` is for cross-referencing across endpoints.
+
+### Seed file
+
+`prisma/seed.ts` populates the curated `Asset` rows from a TypeScript list. The seed runs as part of `npx prisma migrate dev` (and is invoked manually after `prisma migrate deploy` in prod via `npx tsx prisma/seed.ts`). Adding a curated asset means adding a row to the seed file and re-running the seeder; the seed is idempotent (uses `upsert`).
+
+```typescript
+// prisma/seed.ts (sketch)
+const SEED_ASSETS = [
+  { id: "AAPL",    symbol: "AAPL",   name: "Apple Inc.",        assetClass: "EQUITY",    source: "yahoo" },
+  { id: "MSFT",    symbol: "MSFT",   name: "Microsoft Corp.",   assetClass: "EQUITY",    source: "yahoo" },
+  { id: "SPY",     symbol: "SPY",    name: "SPDR S&P 500 ETF",  assetClass: "EQUITY",    source: "yahoo" },
+  { id: "EUR/USD", symbol: "EURUSD", name: "Euro / US Dollar",  assetClass: "FOREX",     source: "exchangerate" },
+  { id: "GC=F",    symbol: "GC",     name: "Gold Futures",      assetClass: "COMMODITY", source: "yahoo" },
+  // ...
+] as const
+```
+
+Crypto is **not** in the seed — it's auto-managed (see below).
+
+### Auto-registration policy
+
+Behavior depends on asset class:
+
+- **`CRYPTO` from CoinGecko top-100**: the fetcher upserts `Asset` rows on every run. CoinGecko's top-100 list churns weekly and manually tracking it would mean constant seed updates. Coins that drop out of top-100 are *not* deleted — they keep `active = true` so historical data remains queryable, but they stop receiving new ticks until they re-enter the list.
+- **`EQUITY`, `FOREX`, `COMMODITY`**: curated only. The fetcher drops any tick whose `assetId` isn't already registered, logs a `proc=…, msg="unregistered asset"` warning, and continues. Adding new assets in these classes requires editing `prisma/seed.ts` and re-running.
+- **`MACRO`**: lives in `MacroSeries`, not `Asset`. Series ids are curated in the FRED fetcher's config (no FK relationship, so no registration step beyond the fetcher knowing about them).
+
+This keeps the high-churn case cheap to maintain while preventing silent corruption of the more stable equity/forex universe.
+
+### Primary source vs. fetched source
+
+`Asset.source` is the **primary** source for that asset — the one whose ticks `/prices/:id` returns and whose history is used when backfilling. The `PriceTick.source` field records where each individual row actually came from.
+
+Multiple sources may legitimately write ticks for the same asset (e.g., BTC from CoinGecko today, and a future Coinbase source tomorrow). The `@@unique([assetId, timestamp, source])` constraint allows this; consumers should expect the same asset to potentially carry parallel time series. Read-side rules:
+
+- `/prices/latest` and `/prices/:id` filter to `tick.source = asset.source` so consumers see one canonical price per asset
+- `/history/:id` defaults to `tick.source = asset.source`; an optional `?source=...` query param lets operators pull alternate-source history for cross-validation
+- The downsampling worker rolls up only the primary source's ticks into `DailySummary`
+
+A source ingesting ticks for an `Asset` whose `Asset.source` differs is allowed but logs a `non-primary tick` info-level line — useful signal for cross-source validation, not an error.
+
+---
+
 ## Source Registry
 
 Mirrors Mission Control's company-registry pattern. Each source is a config object with a fetcher function and a cache TTL. **Scheduling is not in the registry** — it lives in `ecosystem.config.cjs` (PM2 `cron_restart`) so PM2 has a single source of truth for what runs when. The registry only knows how to fetch and normalize.
@@ -253,6 +313,12 @@ When a consumer requests history beyond what's in the DB (e.g., `/history?id=bit
 
 This is the same pattern used in Mission Control's `finance/history` route but generalized across all asset classes.
 
+#### Coalescing concurrent backfills
+
+Two simultaneous `/history/bitcoin?from=2010-01-01` requests must not both fan out to CoinGecko — that wastes the rate-limit budget and risks duplicate insert work. `pipeline.ts:backfill()` keeps an in-process `Map<key, Promise<void>>` keyed by `${assetId}:${source}:${rangeBucket}` (where `rangeBucket` is the requested range rounded to the nearest day). The first caller starts the fetch and stores its promise; subsequent callers `await` the same promise and then re-read the now-populated DB. The map entry is deleted when the promise settles.
+
+The map lives only in the API process — backfills don't run in ingest jobs (see [Long-running ingests vs. `cron_restart`](#long-running-ingests-vs-cron_restart)) — so a single per-process map is sufficient. Cross-process coalescing isn't needed.
+
 ---
 
 ## Downsampling Worker
@@ -317,35 +383,258 @@ Base URL: `http://localhost:3103/api` (prod) / `http://localhost:4103/api` (dev)
 | `GET` | `/health` | Liveness check — `200` if `SELECT 1` against the DB succeeds, `503` otherwise. Not cached. Used by Cloudflare Tunnel and any external uptime monitor |
 | `POST` | `/ingest/:sourceId` | Manually trigger a single source ingest (internal — requires `PULSAR_INTERNAL_TOKEN`). Runs `runIngest` inline in the API process and responds with the inserted row count. Does *not* signal PM2 to restart the corresponding ingest job |
 
-### Response shape
+### Response shapes
+
+All successful responses are JSON. Every endpoint (except `/health`) shares a top-level `meta` object with the request's `fetchedAt` timestamp; data lives under `data`. Optional/missing fields use `null` rather than being omitted, so client types stay stable.
+
+Common types referenced below:
 
 ```typescript
-// GET /prices/latest
-{
-  "timestamp": "2026-05-02T14:00:00Z",
-  "data": [
-    {
-      "assetId": "bitcoin",
-      "symbol": "BTC",
-      "assetClass": "CRYPTO",
-      "close": 95000,
-      "change24h": 2.3,
-      "volume": 28000000000,
-      "source": "coingecko",
-      "fetchedAt": "2026-05-02T13:55:00Z"
-    }
-  ]
+type AssetClass = "CRYPTO" | "EQUITY" | "FOREX" | "COMMODITY"
+type JobStatus  = "RUNNING" | "SUCCESS" | "PARTIAL" | "FAILED"
+
+interface AssetSummary {
+  id: string
+  symbol: string
+  name: string
+  assetClass: AssetClass
+  source: string         // primary source
+  active: boolean
 }
 
-// GET /history/bitcoin?from=2024-01-01&to=2025-01-01&interval=1d
-{
-  "assetId": "bitcoin",
-  "interval": "1d",
-  "points": [
-    { "t": "2024-01-01T00:00:00Z", "o": 42000, "h": 43500, "l": 41000, "c": 43000, "v": 18000000000 }
-  ]
+interface PricePoint {
+  assetId: string
+  symbol: string
+  assetClass: AssetClass
+  close: number
+  change24h: number | null     // see "Read-time computation" below
+  volume: number | null
+  source: string
+  timestamp: string             // ISO-8601 UTC, of the underlying tick
 }
 ```
+
+#### `GET /assets`
+
+Optional `?class=crypto|equity|forex|commodity` filter.
+
+```typescript
+{ meta: { fetchedAt: string }, data: AssetSummary[] }
+```
+
+#### `GET /assets/:id`
+
+```typescript
+{
+  meta: { fetchedAt: string },
+  data: AssetSummary & {
+    firstTickAt: string | null
+    lastTickAt:  string | null
+    tickCount:   number
+  }
+}
+```
+
+`404 not_found` if the asset isn't registered.
+
+#### `GET /prices/latest`
+
+Optional `?class=crypto` (filter by class) or `?ids=bitcoin,ethereum` (explicit subset).
+
+```typescript
+{ meta: { fetchedAt: string, count: number }, data: PricePoint[] }
+```
+
+#### `GET /prices/:id`
+
+```typescript
+{ meta: { fetchedAt: string }, data: PricePoint }
+```
+
+`404 not_found` if the asset is registered but has no ticks yet (cold start) or if the id is unknown.
+
+#### `GET /history/:id`
+
+Query params: `from` (ISO date, required), `to` (ISO date, defaults to now), `interval` (`1h` | `1d` | `1w`, defaults to `1d`), `source` (optional override of the primary source).
+
+```typescript
+{
+  meta: {
+    fetchedAt: string,
+    assetId: string,
+    interval: "1h" | "1d" | "1w",
+    from: string, to: string,
+    backfilled: boolean      // true if this request triggered an external fetch to fill a gap
+  },
+  data: Array<{
+    t: string                // ISO-8601 UTC, bucket-start
+    o: number, h: number, l: number, c: number,
+    v: number | null
+  }>
+}
+```
+
+#### `GET /history/:id/summary`
+
+Pre-aggregated `DailySummary` rows, no resampling, no backfill trigger. Faster than `/history/:id?interval=1d` because it skips gap detection.
+
+```typescript
+{
+  meta: { fetchedAt: string, assetId: string, from: string, to: string },
+  data: Array<{ date: string, o: number, h: number, l: number, c: number, v: number | null }>
+}
+```
+
+#### `GET /macro`
+
+Returns the latest value for every macro series.
+
+```typescript
+{
+  meta: { fetchedAt: string, count: number },
+  data: Array<{
+    seriesId: string
+    name: string
+    value: number
+    timestamp: string
+    source: string
+  }>
+}
+```
+
+#### `GET /macro/:seriesId`
+
+Optional `from`/`to` query params restrict the range.
+
+```typescript
+{
+  meta: { fetchedAt: string, seriesId: string, from: string | null, to: string | null },
+  data: Array<{ timestamp: string, value: number }>
+}
+```
+
+#### `GET /status`
+
+```typescript
+{
+  meta: { fetchedAt: string },
+  data: {
+    sources: Array<{
+      sourceId: string
+      lastSuccessAt: string | null
+      lastFailureAt: string | null
+      lastStatus: JobStatus | null
+      consecutiveFailures: number
+    }>,
+    counts: { assets: number, priceTicks: number, dailySummaries: number, macroSeries: number },
+    db: { sizeBytes: number, walSizeBytes: number }
+  }
+}
+```
+
+#### `GET /status/jobs`
+
+Query params: `?limit=50` (default 50, max 500), `?cursor=<id>` for keyset pagination (descending by id), `?source=coingecko` filter.
+
+```typescript
+{
+  meta: { fetchedAt: string, limit: number, nextCursor: string | null },
+  data: Array<{
+    id: number
+    sourceId: string
+    startedAt: string
+    completedAt: string | null
+    status: JobStatus
+    rowsInserted: number
+    errorMsg: string | null
+  }>
+}
+```
+
+#### `GET /health`
+
+Not wrapped in `meta`/`data` — health checks must be parseable by simple probes.
+
+```typescript
+// 200
+{ status: "ok", db: "ok", uptimeSeconds: number }
+// 503
+{ status: "degraded", db: "error", error: string }
+```
+
+#### `POST /ingest/:sourceId`
+
+Synchronous; runs the ingest inline. Auth: `Authorization: Bearer ${PULSAR_INTERNAL_TOKEN}`.
+
+```typescript
+// 200
+{
+  meta: { fetchedAt: string, sourceId: string, durationMs: number },
+  data: { rowsInserted: number, status: JobStatus }
+}
+```
+
+Errors: `401 unauthorized`, `404 not_found` (unknown sourceId), `502 upstream_error` (fetch failed; `errorMsg` in envelope).
+
+#### `POST /internal/notify`
+
+Auth: `Authorization: Bearer ${PULSAR_INTERNAL_TOKEN}`. Body:
+
+```typescript
+{
+  sourceId: string
+  ticks: Array<{
+    assetId: string
+    timestamp: string       // ISO-8601 UTC
+    open: number | null
+    high: number | null
+    low:  number | null
+    close: number
+    volume: number | null
+  }>
+}
+```
+
+Response: `204 No Content` on success. The API server fans the ticks out over `/ws/prices` and returns immediately — fire-and-forget from the ingest job's perspective.
+
+### Read-time computation
+
+Two response fields are not stored as-is and are computed at read time. Locking the rules here so client code can predict behavior:
+
+- **`change24h`** (`/prices/latest`, `/prices/:id`): server queries the latest `PriceTick` for the asset (filtered to `Asset.source`) and the closest tick at least 24 hours older. Computes `(latest.close - prior.close) / prior.close * 100`. Returns `null` if no tick exists in the 23–25h-old window — never extrapolates beyond that window.
+- **History interval resampling** (`/history/:id`): the source table depends on the requested interval.
+  - `interval=1d` reads directly from `DailySummary` — fast path, no aggregation.
+  - `interval=1w` aggregates `DailySummary` rows: bucket by ISO week (Monday-start UTC); `o` = first day's open, `c` = last day's close, `h` = `MAX(high)`, `l` = `MIN(low)`, `v` = `SUM(volume)`.
+  - `interval=1h` aggregates `PriceTick` rows: bucket by `floor(timestamp / 1h)`; `o` = first tick.close, `c` = last tick.close, `h` = `MAX(COALESCE(high, close))`, `l` = `MIN(COALESCE(low, close))`, `v` = `SUM(volume)`. Only valid for ranges within `TICK_RETENTION_DAYS` — beyond that the raw ticks are gone and the response is `400 bad_request` with `code: "tick_retention_exceeded"`.
+
+Other intervals (1m, 5m, 15m, 4h, monthly) are not supported in v1. Adding them is a per-interval decision about source table + bucket arithmetic.
+
+### Error envelope
+
+Every non-2xx response (except `/health`'s 503) uses:
+
+```typescript
+{
+  error: {
+    code: string         // machine-readable
+    message: string      // human-readable
+    details?: unknown    // optional, structured per error
+  }
+}
+```
+
+Status & code mapping:
+
+| HTTP | `code` | When |
+|:---|:---|:---|
+| `400` | `bad_request` | Invalid query params, malformed body |
+| `400` | `tick_retention_exceeded` | `interval=1h` requested for a range older than `TICK_RETENTION_DAYS` |
+| `401` | `unauthorized` | Missing/invalid `PULSAR_INTERNAL_TOKEN` |
+| `404` | `not_found` | Unknown asset, source, or series id |
+| `429` | `rate_limited` | Reserved for the future external-key path; not emitted today |
+| `502` | `upstream_error` | External API failed during a backfill or manual ingest |
+| `503` | `service_unavailable` | DB unreachable; surfaces from `/health` and propagates if a read fails after stale-cache fallback exhausts |
+| `500` | `internal` | Anything unhandled; logged with full stack |
 
 ### Caching
 
@@ -354,7 +643,8 @@ Adopt Mission Control's in-memory TTL cache pattern directly:
 - On handler error: return stale response with `X-Cache: STALE-FALLBACK`
 - Cache header: `X-Cache: HIT | MISS`
 - TTL per route matches the underlying source TTL
-- `/health`, `/status`, and `/internal/*` are **not** cached
+- `/health`, `/status`, `/status/jobs`, and `/internal/*` are **not** cached
+- The cache is **not** actively invalidated when `/internal/notify` arrives. REST consumers tolerate up to the TTL of staleness by definition; real-time consumers should subscribe to `/ws/prices`. Adding push-driven invalidation would couple the WS path to cache internals for marginal benefit (TTLs are already short — 2-5 minutes for the high-frequency sources).
 
 ### CORS
 
@@ -370,21 +660,58 @@ Mission Control's finance dashboard currently polls `/prices/latest`. WebSocket 
 
 `GET /ws/prices` upgrades to a WebSocket. Implemented via `@hono/node-ws`.
 
-### Subscription protocol
+### Protocol — message types
 
-After connecting, the client sends a JSON subscribe message:
+All messages are JSON, one per WebSocket frame, with a `type` discriminator. The full message-type union for both directions:
 
-```json
-{ "type": "subscribe", "assetIds": ["bitcoin", "AAPL", "EUR/USD"] }
+```typescript
+// Client → server
+type ClientMessage =
+  | { type: "subscribe";   assetIds: string[] }    // [] or ["*"] = all assets
+  | { type: "unsubscribe"; assetIds: string[] }    // [] or ["*"] = clear all subscriptions
+
+// Server → client
+type ServerMessage =
+  | { type: "welcome";    sessionId: string; serverTime: string }
+  | { type: "subscribed"; assetIds: string[] }     // ack — lists ids that are now active
+  | { type: "tick";       assetId: string; tick: { timestamp: string; open: number | null; high: number | null; low: number | null; close: number; volume: number | null; source: string } }
+  | { type: "error";      code: string; message: string }
 ```
 
-The server pushes `tick` messages whenever a subscribed asset has a new `PriceTick` inserted:
+### Connection lifecycle
 
-```json
-{ "type": "tick", "assetId": "bitcoin", "tick": { "timestamp": "2026-05-02T14:00:00Z", "close": 95000, "source": "coingecko" } }
-```
+1. Client opens WS to `/ws/prices`. Server immediately sends `welcome` with a `sessionId` (logged server-side for debugging). Until the client subscribes, no `tick` frames are sent.
+2. Client sends `subscribe`. Server validates each id; unknown ids are silently dropped from the active set, and the `subscribed` ack lists only the valid ones the connection is now tracking.
+3. Subscriptions are **additive** — sending another `subscribe` extends the active set. To narrow it, send `unsubscribe` with the ids to remove (or `[]` / `["*"]` to clear everything).
+4. Server pushes `tick` frames whenever `/internal/notify` arrives carrying a tick whose `assetId` is in the connection's active set (or the active set contains `"*"`). Filtering is per-connection.
+5. Either side may close the connection cleanly (code `1000`).
 
-A subscribe message with no `assetIds` (or `assetIds: ["*"]`) subscribes to all updates. The client may send `{ "type": "unsubscribe", "assetIds": [...] }` at any time.
+### No initial snapshot
+
+The server does **not** push a snapshot of current prices on connect. Clients that need an initial state should call `GET /prices/latest` once before subscribing. This keeps WS purely an update channel and avoids the "did I miss a tick between snapshot and first push?" race.
+
+### Heartbeat
+
+- Server sends a WebSocket-level `ping` frame every 30 seconds. Browser/Node clients reply with `pong` automatically — no app-level handling needed.
+- A client that misses **two consecutive** pongs (no response within 60s) is disconnected with code `1006` (abnormal closure). The client should reconnect with backoff and re-subscribe.
+
+### Backpressure
+
+Each connection has a 256-message outbound queue. If the queue fills (slow consumer), the server closes with code `1009` (overload). The client should reconnect, refetch state via REST, and re-subscribe.
+
+### Subscription cap
+
+A single connection may track at most `WS_MAX_SUBSCRIPTIONS` ids (default `500`). Exceeding the cap returns an `error` frame with `code: "subscription_limit"` and the offending `subscribe` is rejected; the connection stays open and previously-active subscriptions are unaffected.
+
+### Error codes
+
+`error` frames are non-fatal — the connection stays open and the client can retry the offending message. Codes:
+
+| Code | Meaning |
+|:---|:---|
+| `bad_message` | Frame wasn't valid JSON or didn't match the message-type schema |
+| `unknown_type` | `type` field not in the supported set |
+| `subscription_limit` | Connection-level subscription cap exceeded |
 
 ### Cross-process notification
 
@@ -407,11 +734,6 @@ flowchart LR
 1. After a successful insert in `pipeline.ts:runIngest`, the job POSTs the inserted ticks to `http://localhost:{PORT}/internal/notify` with `Authorization: Bearer ${PULSAR_INTERNAL_TOKEN}`
 2. The API server validates the token, then iterates connected WS clients and pushes the ticks each subscriber cares about
 3. If the API server is down, the notification fails silently — the tick is still in the DB, so a reconnecting client can fetch the current state via REST. WebSocket delivery is **best-effort, not durable**.
-
-### Backpressure & heartbeat
-
-- Each WS client has a bounded outbound queue (default 256 messages). If the queue fills (slow consumer), the connection is closed with code `1009` and the client is expected to reconnect + resync via REST.
-- The server sends a ping every 30 seconds; clients that miss two consecutive pings are disconnected.
 
 ---
 
