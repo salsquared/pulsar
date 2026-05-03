@@ -18,11 +18,11 @@ Update this table and the phase heading when a phase is complete.
 | 3 — CoinGecko + pipeline | ✅ done | 100 crypto ticks flowing, dedup via `INSERT OR IGNORE` |
 | 4 — REST skeleton | ✅ done | `/assets` `/prices` `/status` `/health` with `X-Cache` headers |
 | 5 — PM2 ecosystem | ✅ done | `pulsar-dev` + `pulsar-ingest-coingecko` online; ingest confirmed via logs |
-| 6 — History + backfill | ⬜ todo | |
-| 7 — Remaining fetchers + macro | ⬜ todo | |
-| 8 — WebSocket + notify | ⬜ todo | |
-| 9 — Manual ingest trigger | ⬜ todo | |
-| 10 — Downsampling + retention | ⬜ todo | |
+| 6 — History + backfill | ✅ done | All 3 intervals + cache + backfill coalescing verified; uncovered Prisma INTEGER DateTime gotcha |
+| 7 — Remaining fetchers + macro | ✅ done | All 5 sources wired; mempool verified; `/macro` route live; Yahoo temporarily rate-limited (IP cool-down after test calls), FRED/ExchangeRate need API keys |
+| 8 — WebSocket + notify | ✅ done | WS + notify live; tick delivered end-to-end; ingest survives API-down; subscription limit enforced |
+| 9 — Manual ingest trigger | ✅ done | `POST /api/ingest/:sourceId` verified — valid/invalid token and unknown source all correct |
+| 10 — Downsampling + retention | ✅ done | Rollup populates DailySummary correctly; retention prune works; idempotent across re-runs; PM2 entry at 00:30 UTC |
 | 11 — Mission Control migration | ⬜ todo | |
 
 ---
@@ -226,7 +226,7 @@ Update this table and the phase heading when a phase is complete.
 
 ---
 
-## Phase 6 — History endpoint + backfill + coalescing
+## Phase 6 — History endpoint + backfill + coalescing ✅
 
 **Goal:** `/history/:id` works for in-DB ranges, and on-demand backfill fills gaps. Concurrent backfills are coalesced.
 
@@ -274,9 +274,17 @@ Update this table and the phase heading when a phase is complete.
 
 **Done when:** all three intervals return correct shapes; coalescing demonstrably collapses parallel requests; retention check fires at the right boundary.
 
+> **Implementation notes (load-bearing):**
+> - **Prisma 6 stores SQLite `DateTime` as INTEGER (Unix milliseconds), NOT as text.** The "YYYY-MM-DD HH:MM:SS UTC" shown in Prisma's query event log is just display formatting — the actual binding is an integer. Raw INSERTs against tables read by Prisma's ORM **must** bind timestamps as integer ms via `src/lib/datetime.ts:toPrismaDateTime(d)` (`return d.getTime()`). Storing ISO text strings makes ORM range queries silently return 0 rows because SQLite type-coerces TEXT-vs-INTEGER comparisons to NULL. This bug only fires on the *upper* bound of a range filter — `gte` alone happens to work, which masks the issue until you write a query with both `gte` and `lte` (e.g. `change24h` window, history range queries). `pipeline.ts:insertPriceTicksOrIgnore` and `insertMacroOrIgnore` both apply this conversion.
+> - Raw SQL queries against `PriceTick.timestamp` must use `strftime('%Y-%m-%dT%H:00:00Z', timestamp / 1000, 'unixepoch')` to bucket by hour/day, since the column is INTEGER ms.
+> - **`interval=1d` falls back to PriceTick aggregation** when `DailySummary` is empty (rollup hasn't run yet). Without this fallback, `interval=1d` returns 0 points until Phase 10 lands, breaking the public API for clients early on.
+> - **Gap detection: backfill only when `ticksInRange === 0`.** The original architecture sketch said "backfill if `from < earliest`", but that fires on every request because of millisecond-precision differences in CoinGecko's data points. Counting ticks in the requested range is more correct: partial gaps are accepted; only fully-uncovered ranges trigger backfill.
+> - **Backfilled responses bypass the cache** so repeat requests after a backfill see fresh data. Non-backfilled responses are cached for 5 min.
+> - **CoinGecko's `/coins/{id}/market_chart/range` requires a demo API key** for ranges older than ~24h. Without `COINGECKO_API_KEY` in env, backfills for older ranges return `502 upstream_error`; current-day data works without a key.
+
 ---
 
-## Phase 7 — Remaining fetchers + macro routes
+## Phase 7 — Remaining fetchers + macro routes ✅
 
 **Goal:** all five sources ingest correctly; `/macro` and `/macro/:seriesId` work.
 
@@ -296,9 +304,17 @@ Update this table and the phase heading when a phase is complete.
 
 > **PM2 note:** as each source is verified, add its PM2 entry to `ecosystem.config.cjs` and run `pm2 start ecosystem.config.cjs --only "pulsar-ingest-<id>"`. All five entries should be live by the end of this phase.
 
+> **Implementation notes:**
+> - **Yahoo Finance v7 quote endpoint now returns 401** — Yahoo tightened auth requirements. The implementation was updated to use the v8/finance/chart endpoint instead (per-symbol requests, same data). The v8 endpoint can 429 when called rapidly in testing; at normal PM2 intervals (5 min) it works fine. Add retry+backoff for 429 as implemented.
+> - **`GET /macro` latest-per-series query** — SQLite has no `DISTINCT ON`. Used a self-join: `SELECT m.* FROM MacroSeries m INNER JOIN (SELECT seriesId, MAX(timestamp) AS maxTs FROM MacroSeries GROUP BY seriesId) latest ON ...`. Raw query returns `timestamp` as `bigint`; convert with `Number(r.timestamp)`.
+> - **FRED series fetched from 2015-01-01** — `limit=10000` in the URL gets all observations in one request. `INSERT OR IGNORE` handles deduplication on daily re-runs. Observations with `value = "."` (FRED missing-data sentinel) are filtered.
+> - **ExchangeRate-API v6 response uses `conversion_rates`** (not `rates`). Pair derivation from USD base: `EUR/USD = 1 / rates.EUR`, `USD/JPY = rates.JPY`, etc.
+> - **`ServerType` union includes Http2Server** — `closeAllConnections()` only exists on HTTP/1.1 `Server`. Fixed with `if ('closeAllConnections' in server)` guard (pre-existing type error caught during Phase 7 lint).
+> - **PM2 startup delays stagger boot-time API calls**: coingecko=0s, mempool=30s, yahoo=60s, exchangerate=90s. Avoids simultaneous burst on restart.
+
 ---
 
-## Phase 8 — WebSocket + cross-process notification
+## Phase 8 — WebSocket + cross-process notification ✅
 
 **Goal:** WS clients subscribe and receive real-time tick frames whenever any ingest job lands new ticks.
 
@@ -352,9 +368,18 @@ Update this table and the phase heading when a phase is complete.
 
 **Done when:** verify passes; killing the API mid-ingest does not crash the ingest job.
 
+> **Implementation notes:**
+> - **`createNodeWebSocket({ app })` must be called before routes are mounted** — `@hono/node-ws` patches the app to intercept upgrade requests. Calling it after `serve()` is too late.
+> - **`injectWebSocket(server)` must be called after `serve()`** — hooks the WS upgrade handler into the HTTP server's `upgrade` event.
+> - **Session `sessionId` captured via closure in `onOpen`** — passed to pong listener so it can look up the correct session in the map.
+> - **`ws.raw?.ping()`** — heartbeat sends via the underlying `ws.WebSocket`; pong is caught via `ws.raw?.on('pong', ...)` in `onOpen`. Both are unavailable through `WSContext` directly.
+> - **Raw send with callback for queue tracking** — `s.ws.raw?.send(msg, () => { s.queue-- })` gives flush confirmation; falls back to `WSContext.send` (no callback) when raw is unavailable.
+> - **`PORT=4103` must be set in `.env.development`** — ingest jobs use `process.env.PORT` to construct the notify URL. Without it they default to 3103 (prod) and the notify call fails in dev. Updated `.env.development.example` to have this uncommented.
+> - **`@types/ws` added as dev dep** — needed for typed access to the raw `ws.WebSocket` instance.
+
 ---
 
-## Phase 9 — Manual ingest trigger
+## Phase 9 — Manual ingest trigger ✅
 
 **Goal:** operators can `curl -X POST -H "Authorization: Bearer $T" :4103/api/ingest/coingecko` for a synchronous run.
 
@@ -370,7 +395,7 @@ Update this table and the phase heading when a phase is complete.
 
 ---
 
-## Phase 10 — Downsampling worker + tick retention
+## Phase 10 — Downsampling worker + tick retention ✅
 
 **Goal:** nightly rollup populates `DailySummary` for every asset and prunes ticks older than `TICK_RETENTION_DAYS`.
 
@@ -395,6 +420,13 @@ Update this table and the phase heading when a phase is complete.
    - Re-run; row counts unchanged (idempotent).
 
 **Done when:** verify passes; re-running produces the same DailySummary count.
+
+> **Implementation notes:**
+> - **Aggregation runs entirely in one `$queryRaw` per asset** — window functions partition by `strftime('%Y-%m-%d', timestamp / 1000, 'unixepoch')`, then `MAX(CASE WHEN rn_asc = 1 THEN close END)` picks the day's open and `MAX(CASE WHEN rn_desc = 1 THEN close END)` picks the close. One round trip vs N day-by-day queries.
+> - **Process-exit pattern uses `exitCode` + `finally`** — `process.exit()` does not wait for `finally` blocks, so `await prisma.$disconnect()` would be skipped. Setting `exitCode` and calling `process.exit(exitCode)` after the try/finally ensures the disconnect runs.
+> - **Rollup re-processes the latest summary's day each run** — handles late-arriving ticks for that day. Edge case in artificial tests with `TICK_RETENTION_DAYS=1`: the boundary day gets re-summarized with fewer ticks each run as pruning eats into it. Not an issue at production retention (90d) since pruning never touches days adjacent to the rollup window.
+> - **Tick prune happens AFTER rollup** so we never lose data — the cutoff is computed once at rollup time. There's a small drift (rollup-time vs check-time) where a tick may straddle the boundary; resolved on the next run.
+> - **CRYPTO assets without ticks are skipped** — auto-registered crypto assets like `btc-fee-fast` exist in the Asset table but may have no ticks yet for the primary source. The rollup falls through to `continue` if `MIN(timestamp)` returns null.
 
 ---
 

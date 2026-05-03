@@ -2,6 +2,7 @@ import type { JobStatus, NormalizedTick } from '../types.js'
 import { getSource } from '../lib/source-registry.js'
 import { logger } from '../lib/logger.js'
 import prismaPromise from '../lib/prisma.js'
+import { notifyApi } from '../lib/notify.js'
 
 // ─── SQLite batch insert helpers ─────────────────────────────────────────────
 // Prisma 6 removed skipDuplicates for SQLite createMany. Use INSERT OR IGNORE instead.
@@ -91,11 +92,6 @@ function floorDay(d: Date): string {
 
 function ceilDay(d: Date): string {
   return new Date(Math.ceil(d.getTime() / 86_400_000) * 86_400_000).toISOString().slice(0, 10)
-}
-
-// ─── Notify API helper (stubbed until Phase 7) ────────────────────────────────
-async function notifyApi(_sourceId: string, _ticks: NormalizedTick[]): Promise<void> {
-  // Uncommented in Phase 7 when src/lib/notify.ts is implemented.
 }
 
 // ─── runIngest ────────────────────────────────────────────────────────────────
