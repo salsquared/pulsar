@@ -5,8 +5,12 @@ import prismaPromise from '../lib/prisma.js'
 
 // ─── SQLite batch insert helpers ─────────────────────────────────────────────
 // Prisma 6 removed skipDuplicates for SQLite createMany. Use INSERT OR IGNORE instead.
+// Timestamps must be written in Prisma's storage format ("YYYY-MM-DD HH:MM:SS[.SSS] UTC")
+// so ORM range queries (e.g. timestamp <= now) work without raw-SQL workarounds.
+// See src/lib/datetime.ts for the format rationale.
 
 import type { PrismaClient } from '@prisma/client'
+import { toPrismaDateTime } from '../lib/datetime.js'
 
 async function insertPriceTicksOrIgnore(
   prisma: PrismaClient,
@@ -33,7 +37,7 @@ async function insertPriceTicksOrIgnore(
     const ph = batch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?)').join(', ')
     const vals: unknown[] = batch.flatMap((r) => [
       r.assetId,
-      r.timestamp.toISOString(),
+      toPrismaDateTime(r.timestamp),
       r.open,
       r.high,
       r.low,
@@ -64,7 +68,7 @@ async function insertMacroOrIgnore(
     const batch = rows.slice(i, i + BATCH)
     const ph = batch.map(() => '(?, ?, ?, ?, ?)').join(', ')
     const vals: unknown[] = batch.flatMap((r) => [
-      r.seriesId, r.name, r.value, r.timestamp.toISOString(), r.source,
+      r.seriesId, r.name, r.value, toPrismaDateTime(r.timestamp), r.source,
     ])
     await prisma.$executeRawUnsafe(
       `INSERT OR IGNORE INTO "MacroSeries" ("seriesId","name","value","timestamp","source") VALUES ${ph}`,

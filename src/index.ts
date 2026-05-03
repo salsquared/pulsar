@@ -7,6 +7,7 @@ import prismaPromise from './lib/prisma.js'
 import health from './routes/health.js'
 import assets from './routes/assets.js'
 import prices from './routes/prices.js'
+import history from './routes/history.js'
 import status from './routes/status.js'
 
 const app = new Hono()
@@ -18,6 +19,7 @@ app.route('/health', health)
 const api = new Hono()
 api.route('/assets', assets)
 api.route('/prices', prices)
+api.route('/history', history)
 api.route('/status', status)
 
 app.route('/api', api)
@@ -31,9 +33,11 @@ const server = serve({ fetch: app.fetch, port }, (info) => {
   logger.info('listening', { port: info.port })
 })
 
-// Graceful shutdown
+// Graceful shutdown — closeAllConnections() forces keep-alive connections to
+// drop immediately so the port is released before tsx --watch spawns the new process.
 process.on('SIGTERM', async () => {
   logger.info('SIGTERM received, shutting down')
+  server.closeAllConnections()
   server.close(async () => {
     const prisma = await prismaPromise
     await prisma.$disconnect()

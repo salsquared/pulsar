@@ -17,12 +17,12 @@ Update this table and the phase heading when a phase is complete.
 | 2 — Core libs | ✅ done | 16/16 smoke tests passing |
 | 3 — CoinGecko + pipeline | ✅ done | 100 crypto ticks flowing, dedup via `INSERT OR IGNORE` |
 | 4 — REST skeleton | ✅ done | `/assets` `/prices` `/status` `/health` with `X-Cache` headers |
-| 5 — History + backfill | ⬜ todo | |
-| 6 — Remaining fetchers + macro | ⬜ todo | |
-| 7 — WebSocket + notify | ⬜ todo | |
-| 8 — Manual ingest trigger | ⬜ todo | |
-| 9 — Downsampling + retention | ⬜ todo | |
-| 10 — PM2 ecosystem | ⬜ todo | |
+| 5 — PM2 ecosystem | ✅ done | `pulsar-dev` + `pulsar-ingest-coingecko` online; ingest confirmed via logs |
+| 6 — History + backfill | ⬜ todo | |
+| 7 — Remaining fetchers + macro | ⬜ todo | |
+| 8 — WebSocket + notify | ⬜ todo | |
+| 9 — Manual ingest trigger | ⬜ todo | |
+| 10 — Downsampling + retention | ⬜ todo | |
 | 11 — Mission Control migration | ⬜ todo | |
 
 ---
@@ -132,7 +132,7 @@ Update this table and the phase heading when a phase is complete.
       - `const ticks = await source.fetch()`
       - Resolve registered assetIds: for `assetClass: CRYPTO`, `prisma.asset.upsert` each unique assetId in the batch (auto-register). For other classes, `prisma.asset.findMany({ where: { id: { in: ids } } })` and drop unregistered ticks (log a warning for each dropped id).
       - `const result = await prisma.priceTick.createMany({ data: rowsForInsert, skipDuplicates: true })` — use `result.count` as `rowsInserted`.
-      - **Phase 7 hook:** call `await notifyApi(sourceId, insertedTicks).catch(() => {})` (stubbed to a no-op in this phase; uncommented in Phase 7).
+      - **Phase 8 hook:** call `await notifyApi(sourceId, insertedTicks).catch(() => {})` (stubbed to a no-op in this phase; uncommented in Phase 8).
       - Update the IngestJob row: `status: 'SUCCESS', completedAt, rowsInserted: result.count`.
       - Return `{ rowsInserted, status: 'SUCCESS' }`.
    4. Catch: update IngestJob row with `status: 'FAILED', completedAt, errorMsg: err.message`. Rethrow.
@@ -146,7 +146,7 @@ Update this table and the phase heading when a phase is complete.
 
 **Done when:** verify is deterministic. Multiple back-to-back runs do not duplicate rows.
 
-> **Implementation notes:** Prisma 6 removed `skipDuplicates` for SQLite `createMany` — replaced with `INSERT OR IGNORE` via `$executeRawUnsafe`, batched at 124 rows (floor(999 params / 8 cols)). Same fix applied to `MacroSeries` inserts. `PROC` env var must be set *before* the first logger import so every log line is tagged.
+> **Implementation notes:** Prisma 6 removed `skipDuplicates` for SQLite `createMany` — replaced with `INSERT OR IGNORE` via `$executeRawUnsafe`, batched at 124 rows (floor(999 params / 8 cols)). Same fix applied to `MacroSeries` inserts. `PROC` env var must be set *before* the first logger import so every log line is tagged. The `notifyApi` call in `pipeline.ts` is stubbed as a no-op until Phase 8 (WebSocket).
 
 ---
 
@@ -189,7 +189,44 @@ Update this table and the phase heading when a phase is complete.
 
 ---
 
-## Phase 5 — History endpoint + backfill + coalescing
+## Phase 5 — PM2 ecosystem ✅
+
+**Goal:** the API server and the CoinGecko ingest job run under PM2 so the service can be validated through the real process manager. Ingest entries for sources that aren't implemented yet are added incrementally as each later phase completes — don't wait for all sources before standing up PM2.
+
+1. **Generate `PULSAR_INTERNAL_TOKEN`** — `openssl rand -hex 32`. Write the value into `.env.development` (and `.env.production` when deploying prod). Add it to both `.env.*.example` files with a comment describing rotation.
+2. **`npm run build`** — compile `src/` to `dist/` so the prod `start` entry works.
+3. **`DATABASE_URL=file:./prod.db npx prisma migrate deploy`** — apply migrations to `prod.db` (separate from `dev.db`).
+4. **Edit `/Users/sal/salsquared/ecosystem.config.cjs`** — append the Pulsar entries. At this phase, only add what is currently implemented:
+   ```javascript
+   // API servers
+   { name: "pulsar",     cwd: "/Users/sal/salsquared/pulsar", script: "npm", args: "run start",
+     env: { PORT: 3103, NODE_ENV: "production", DATABASE_URL: "file:./prod.db" } },
+   { name: "pulsar-dev", cwd: "/Users/sal/salsquared/pulsar", script: "npm", args: "run dev",
+     env: { PORT: 4103, NODE_ENV: "development", DATABASE_URL: "file:./dev.db" } },
+
+   // CoinGecko ingest — add remaining sources as each Phase 7 source is completed
+   { name: "pulsar-ingest-coingecko", cwd: "/Users/sal/salsquared/pulsar",
+     script: "npx", args: "tsx src/ingest/run.ts",
+     env: { SOURCE_ID: "coingecko", NODE_ENV: "production", DATABASE_URL: "file:./prod.db",
+            STARTUP_DELAY_SECONDS: "0" },
+     cron_restart: "*/5 * * * *", autorestart: false },
+   ```
+   Note: `PULSAR_INTERNAL_TOKEN` and API keys should also be in each entry's `env` block, or PM2 should load them from the shell environment (`env_file` is not a PM2 native feature — set vars in the ecosystem env blocks or ensure PM2 inherits them from the shell).
+5. **`pm2 start ecosystem.config.cjs --only "pulsar-dev,pulsar-ingest-coingecko"` && `pm2 save`** — start dev first; add prod entries when ready.
+6. **Verify:**
+   - `pm2 logs pulsar-dev` shows `listening port=4103`.
+   - `curl :4103/api/status` returns the locked shape with `counts.priceTicks` growing over time.
+   - After 10 minutes, `pm2 logs pulsar-ingest-coingecko --nostream | grep "ingest complete"` shows ≥ 2 runs.
+   - No `SQLITE_BUSY` errors in any log stream.
+   - `pm2 list` shows both processes as `online`.
+
+**Done when:** API and CoinGecko ingest are both online in PM2 for ≥ 30 minutes; `/health` stays 200; `IngestJob` table in the DB shows steady successful runs.
+
+> **Implementation notes:** Ingest jobs use `script: "node", args: "--env-file .env.development --import tsx/esm src/ingest/run.ts"` — this loads secrets from the env file without exposing them in the committed ecosystem config. The `env` block in each ingest entry only contains non-secret operational vars (`SOURCE_ID`, `STARTUP_DELAY_SECONDS`). Ingest jobs show as `stopped` between cron runs — this is expected with `autorestart: false`.
+
+---
+
+## Phase 6 — History endpoint + backfill + coalescing
 
 **Goal:** `/history/:id` works for in-DB ranges, and on-demand backfill fills gaps. Concurrent backfills are coalesced.
 
@@ -239,7 +276,7 @@ Update this table and the phase heading when a phase is complete.
 
 ---
 
-## Phase 6 — Remaining fetchers + macro routes
+## Phase 7 — Remaining fetchers + macro routes
 
 **Goal:** all five sources ingest correctly; `/macro` and `/macro/:seriesId` work.
 
@@ -257,9 +294,11 @@ Update this table and the phase heading when a phase is complete.
 
 **Done when:** all five sources flow data; macro endpoints return locked shapes; non-crypto sources correctly drop unregistered assetIds.
 
+> **PM2 note:** as each source is verified, add its PM2 entry to `ecosystem.config.cjs` and run `pm2 start ecosystem.config.cjs --only "pulsar-ingest-<id>"`. All five entries should be live by the end of this phase.
+
 ---
 
-## Phase 7 — WebSocket + cross-process notification
+## Phase 8 — WebSocket + cross-process notification
 
 **Goal:** WS clients subscribe and receive real-time tick frames whenever any ingest job lands new ticks.
 
@@ -315,7 +354,7 @@ Update this table and the phase heading when a phase is complete.
 
 ---
 
-## Phase 8 — Manual ingest trigger
+## Phase 9 — Manual ingest trigger
 
 **Goal:** operators can `curl -X POST -H "Authorization: Bearer $T" :4103/api/ingest/coingecko` for a synchronous run.
 
@@ -331,7 +370,7 @@ Update this table and the phase heading when a phase is complete.
 
 ---
 
-## Phase 9 — Downsampling worker + tick retention
+## Phase 10 — Downsampling worker + tick retention
 
 **Goal:** nightly rollup populates `DailySummary` for every asset and prunes ticks older than `TICK_RETENTION_DAYS`.
 
@@ -356,30 +395,6 @@ Update this table and the phase heading when a phase is complete.
    - Re-run; row counts unchanged (idempotent).
 
 **Done when:** verify passes; re-running produces the same DailySummary count.
-
----
-
-## Phase 10 — PM2 ecosystem
-
-**Goal:** every Pulsar process runs under PM2 with the schedules and constraints from the architecture.
-
-1. **Generate `PULSAR_INTERNAL_TOKEN`** — `openssl rand -hex 32`. Write to the untracked `.env` (and to `.env` for any other host this is deployed on). Document the rotation procedure in a comment in `.env.example`.
-2. **Edit `/Users/sal/salsquared/ecosystem.config.cjs`** — append every entry from `[architecture § PM2 Integration]`:
-   - `pulsar` (prod, port 3103)
-   - `pulsar-dev` (dev, port 4103)
-   - `pulsar-ingest-coingecko/-mempool/-yahoo/-exchangerate/-fred`
-   - `pulsar-rollup`
-3. **Set `STARTUP_DELAY_SECONDS`** per ingest entry: `0`, `15`, `30`, `45`, `60` across the five sources. Prevents the boot burst (`[architecture § Process startup burst]`).
-4. **`npm run build`** to ensure `dist/` exists for prod start.
-5. **`npx prisma migrate deploy`** against `prod.db`.
-6. **`pm2 start ecosystem.config.cjs --only "pulsar*"` && `pm2 save`** to persist across reboots.
-7. **Verify:**
-   - `pm2 logs "pulsar*"` shows clean startup with the staggered delays visible in timestamps.
-   - After 10 minutes, `pm2 logs pulsar-ingest-coingecko --nostream | head` shows ≥ 2 completed runs.
-   - `curl :3103/api/status` shows fresh `lastSuccessAt` for each source.
-   - No `SQLITE_BUSY` errors anywhere in `pm2 logs "pulsar*"` for the first hour.
-
-**Done when:** verify passes for ≥ 30 minutes of uptime; `/health` stays 200; ingest table grows steadily.
 
 ---
 

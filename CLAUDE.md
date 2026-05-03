@@ -11,7 +11,8 @@ Active implementation follows `docs/implementation-plan.md`. When a phase is com
 
 ## Commands
 
-- `npm run dev` — Hono dev server on **port 4103** with tsx watch mode. `DATABASE_URL=file:./dev.db` is baked into the script (resolves to `prisma/dev.db` relative to the schema).
+- `npm run dev` — Hono dev server on **port 4103**, no file watching. Used by PM2 (`pulsar-dev` entry) so PM2 owns the process lifecycle — use `pm2 reload pulsar-dev` after code changes.
+- `npm run dev:watch` — Same but with `--watch` for standalone development **outside PM2** only. Do not use this inside PM2; tsx and PM2 will fight over process restarts.
 - `npm run start` — production server on **port 3103**. `DATABASE_URL=file:./prod.db` is baked in (`prisma/prod.db`).
 - `npm run build` — compiles TypeScript to `dist/`.
 - `npm run lint` — ESLint + TypeScript type-check.
