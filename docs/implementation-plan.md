@@ -23,7 +23,7 @@ Update this table and the phase heading when a phase is complete.
 | 8 — WebSocket + notify | ✅ done | WS + notify live; tick delivered end-to-end; ingest survives API-down; subscription limit enforced |
 | 9 — Manual ingest trigger | ✅ done | `POST /api/ingest/:sourceId` verified — valid/invalid token and unknown source all correct |
 | 10 — Downsampling + retention | ✅ done | Rollup populates DailySummary correctly; retention prune works; idempotent across re-runs; PM2 entry at 00:30 UTC |
-| 11 — Mission Control migration | ⬜ todo | |
+| 11 — Mission Control migration | ✅ done | `/api/finance` + `/api/finance/history` consume Pulsar correctly; top100 cards render with proper symbol+name; fees populated from per-asset `/prices/btc-fee-*` |
 
 ---
 
@@ -430,7 +430,7 @@ Update this table and the phase heading when a phase is complete.
 
 ---
 
-## Phase 11 — Mission Control migration
+## Phase 11 — Mission Control migration ✅
 
 **Goal:** Mission Control reads from Pulsar instead of calling external APIs directly. Pulsar's data shapes match what MC's frontend expects.
 
@@ -454,6 +454,14 @@ Update this table and the phase heading when a phase is complete.
    - Pulsar's `/status/jobs` shows steady ingest activity for the sources MC depends on.
 
 **Done when:** MC has zero direct calls to migrated upstreams; dashboards render correctly under load.
+
+> **Implementation notes:**
+> - **MC routes were already shells calling Pulsar** but had two bugs masking the issue: (a) treated Pulsar's `{ meta, data }` envelope as a raw array; (b) called `?class=mempool` (mempool is a *source*, not an `AssetClass`). Fixed by extracting `data` and using `?class=CRYPTO`.
+> - **Bitcoin fees fetched via individual `/api/prices/btc-fee-{fast,30min,eco}`** rather than a class filter — these are CRYPTO assets in Pulsar, the original Mempool.space response shape is reconstructed on the MC side.
+> - **`OhlcvPoint` shape mismatch**: Pulsar returns `{ t, o, h, l, c, v }`; MC expected `{ timestamp, close }`. Mapped in the MC adapter.
+> - **`PricePoint.name` added to Pulsar** — the MarketTop100Card needs human-readable names. Pulsar's `Asset.name` was already populated for curated assets but defaulted to `assetId` for auto-registered crypto. Updated the CoinGecko fetcher to capture `symbol` and `name` from `/coins/markets` and added them to the upsert. Crypto symbols now display as "BTC" / "ETH" instead of "BITCOIN" / "ETHEREUM".
+> - **Future enhancement (out of scope)**: Pulsar doesn't yet store `image`, `marketCap`, `marketCapRank`. MarketTop100Card was updated to render a letter-avatar fallback when image is missing. Adding these fields would require an Asset schema migration; deferred until needed.
+> - **Yahoo rate-limit caveat**: rapid test calls during Phases 7+ triggered an IP-level rate limit. The Yahoo source code is correct; once the limit clears (typically <24h) the PM2 cron job will resume pulling data.
 
 ---
 

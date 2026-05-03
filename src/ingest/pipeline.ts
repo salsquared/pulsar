@@ -133,20 +133,30 @@ export async function runIngest(sourceId: string): Promise<{
     const uniqueAssetIds = [...new Set(ticks.map((t) => t.assetId))]
 
     if (source.assetClass === 'CRYPTO') {
-      // CoinGecko provides name/symbol in the markets endpoint but not in NormalizedTick.
-      // Upsert with placeholder name/symbol; these get overwritten if richer data is provided.
+      // For each unique asset, take the first tick's metadata (symbol/name) if present.
+      // Falls back to assetId-derived placeholders when the source doesn't carry metadata.
+      const meta = new Map<string, { symbol: string; name: string }>()
+      for (const t of ticks) {
+        if (meta.has(t.assetId)) continue
+        meta.set(t.assetId, {
+          symbol: t.symbol ?? t.assetId.toUpperCase().replace(/-/g, '').slice(0, 10),
+          name: t.name ?? t.assetId,
+        })
+      }
       for (const id of uniqueAssetIds) {
+        const m = meta.get(id)!
         await prisma.asset.upsert({
           where: { id },
           create: {
             id,
-            symbol: id.toUpperCase().replace(/-/g, '').slice(0, 10),
-            name: id,
+            symbol: m.symbol,
+            name: m.name,
             assetClass: 'CRYPTO',
             source: sourceId,
             active: true,
           },
-          update: {},
+          // Refresh metadata on every run — keeps name/symbol up to date if upstream changes.
+          update: { symbol: m.symbol, name: m.name },
         })
       }
     } else {

@@ -27,6 +27,7 @@ export interface Tick {
 export interface PricePoint {
   assetId: string
   symbol: string
+  name: string
   assetClass: AssetClass
   close: number
   change24h: number | null
@@ -54,6 +55,10 @@ export interface NormalizedTick {
   high?: number | null
   low?: number | null
   volume?: number | null
+  // Optional asset metadata. Auto-registering sources (CRYPTO) can carry
+  // human-readable names/symbols here so the pipeline writes them to Asset.
+  name?: string
+  symbol?: string
 }
 
 export interface NormalizedMacro {
