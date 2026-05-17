@@ -4,12 +4,11 @@ Pulsar is the financial data ingest and storage service for the **salsquared** e
 
 It runs as a Node backend (no UI) behind Cloudflare Tunnel:
 
-| Environment | API port | DB path | DB port (reserved) |
-|:---|:---|:---|:---|
-| Production | `3103` | `prisma/prod.db` | `8103` |
-| Development | `4103` | `prisma/dev.db` | `8203` |
+| API port | DB path | DB port (reserved) |
+|:---|:---|:---|
+| `3103` | `prisma/pulsar.db` | `8103` |
 
-The DB ports are reserved for a future PostgreSQL/TimescaleDB migration; today the database is SQLite (WAL mode).
+The DB port is reserved for a future PostgreSQL/TimescaleDB migration; today the database is SQLite (WAL mode).
 
 ---
 
@@ -74,16 +73,16 @@ Scheduling is owned entirely by PM2's `cron_restart` — there is no in-process 
 - npm
 - PM2 (`npm i -g pm2`) — only needed for production / cron-driven ingest
 
-### Install and run (dev)
+### Install and run
 
 ```bash
-cp .env.development.example .env.development   # fill in API keys + PULSAR_INTERNAL_TOKEN
+cp .env.example .env            # fill in API keys + PULSAR_INTERNAL_TOKEN
 npm install
-npx prisma migrate dev          # creates prisma/dev.db
-npm run dev                     # http://localhost:4103
+npx prisma migrate dev          # creates prisma/pulsar.db
+npm run dev                     # http://localhost:3103 (or `npm run build && npm run start` for the built version)
 ```
 
-The dev server uses `tsx` watch mode and loads `.env.development`. To run any source ingest manually in dev:
+`npm run dev` runs the entry via `tsx` (no build step). To run any source ingest manually:
 
 ```bash
 SOURCE_ID=coingecko npx tsx src/ingest/run.ts
@@ -103,7 +102,7 @@ pm2 start ecosystem.config.cjs --only "pulsar*"
 
 ## API
 
-Base URL: `http://localhost:3103/api` (prod) / `http://localhost:4103/api` (dev).
+Base URL: `http://localhost:3103/api`.
 
 ### REST endpoints
 
@@ -152,26 +151,25 @@ Adding a new source = a `SourceConfig` entry in `src/lib/source-registry.ts` plu
 
 ## Configuration
 
-Neither `.env.development` nor `.env.production` is committed. Copy the example templates and fill in values:
+`.env` is not committed. Copy the example template and fill in values:
 
 ```bash
-cp .env.development.example .env.development
-cp .env.production.example .env.production
+cp .env.example .env
 ```
 
-| Var | File | Purpose |
+| Var | Source | Purpose |
 |:---|:---|:---|
-| `DATABASE_URL` | `.env.development` / `.env.production` | SQLite file path — `file:./dev.db` or `file:./prod.db` (relative to `prisma/`) |
-| `COINGECKO_API_KEY` | `.env` (untracked) | CoinGecko API key |
-| `ALPHA_VANTAGE_KEY` | `.env` (untracked) | Alpha Vantage API key |
-| `FRED_API_KEY` | `.env` (untracked) | FRED API key |
-| `EXCHANGERATE_API_KEY` | `.env` (untracked) | ExchangeRate-API key |
-| `PULSAR_INTERNAL_TOKEN` | `.env` (untracked) | Shared secret for `/internal/*` and `POST /ingest/:sourceId` |
+| `DATABASE_URL` | `.env` | SQLite file path — `file:./pulsar.db` (relative to `prisma/`) |
+| `COINGECKO_API_KEY` | `.env` | CoinGecko API key |
+| `ALPHA_VANTAGE_KEY` | `.env` | Alpha Vantage API key |
+| `FRED_API_KEY` | `.env` | FRED API key |
+| `EXCHANGERATE_API_KEY` | `.env` | ExchangeRate-API key |
+| `PULSAR_INTERNAL_TOKEN` | `.env` | Shared secret for `/internal/*` and `POST /ingest/:sourceId` |
 | `TICK_RETENTION_DAYS` | `.env` (optional) | `PriceTick` retention window (default `90`) |
+| `PORT` | `.env` or PM2 entry | API server port (default `3103`) |
 | `STARTUP_DELAY_SECONDS` | per-PM2 entry (optional) | Stagger ingest job startup to avoid boot bursts |
 | `SOURCE_ID` | per-PM2 entry | Which source the ingest run.ts should fetch |
-| `PORT` | per-PM2 entry | API server port (3103 prod / 4103 dev) |
-| `NODE_ENV` | per-PM2 entry | `development` / `production` |
+| `NODE_ENV` | per-PM2 entry | `production` |
 
 ---
 
@@ -204,8 +202,9 @@ pulsar/
 
 | Command | Effect |
 |:---|:---|
-| `npm run dev` | Dev server on port 4103 with `tsx` watch |
-| `npm run start` | Production server on port 3103 |
+| `npm run dev` | Server on port 3103 via `tsx` (no build) |
+| `npm run dev:watch` | Same as `dev` with `--watch` (standalone, not under PM2) |
+| `npm run start` | Built server on port 3103 (`dist/index.js`) |
 | `npm run build` | Compile TypeScript to `dist/` |
 | `npm run lint` | ESLint + `tsc --noEmit` |
 | `npx prisma migrate dev` | Apply schema changes in dev |
@@ -222,8 +221,7 @@ One-off scripts (fetcher experiments, DB inspection, manual backfills) belong in
 
 | Name | Role | Schedule |
 |:---|:---|:---|
-| `pulsar` | Prod API server (3103) | always-on |
-| `pulsar-dev` | Dev API server (4103) | always-on |
+| `pulsar` | API server (3103) | always-on |
 | `pulsar-ingest-coingecko` | CoinGecko fetch | `*/5 * * * *` |
 | `pulsar-ingest-mempool` | Mempool fees | `*/2 * * * *` |
 | `pulsar-ingest-yahoo` | Yahoo Finance | `*/15 * * * *` |

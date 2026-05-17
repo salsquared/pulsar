@@ -43,7 +43,7 @@ app.route('/api', api)
 // 404 fallback
 app.notFound((c) => c.json({ error: { code: 'not_found', message: 'Route not found' } }, 404))
 
-const port = Number(process.env.PORT ?? 4103)
+const port = Number(process.env.PORT ?? 3103)
 
 const server = serve({ fetch: app.fetch, port }, (info) => {
   logger.info('listening', { port: info.port })

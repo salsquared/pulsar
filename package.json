@@ -4,9 +4,9 @@
   "description": "Financial data ingest and storage service for the salsquared ecosystem",
   "type": "module",
   "scripts": {
-    "dev": "node --env-file .env.development --import tsx/esm src/index.ts",
-    "dev:watch": "node --env-file .env.development --import tsx/esm --watch src/index.ts",
-    "start": "node --env-file .env.production dist/index.js",
+    "dev": "node --env-file .env --import tsx/esm src/index.ts",
+    "dev:watch": "node --env-file .env --import tsx/esm --watch src/index.ts",
+    "start": "node --env-file .env dist/index.js",
     "build": "tsc",
     "lint": "eslint . && tsc --noEmit"
   },

@@ -25,6 +25,8 @@ Update this table and the phase heading when a phase is complete.
 | 10 — Downsampling + retention | ✅ done | Rollup populates DailySummary correctly; retention prune works; idempotent across re-runs; PM2 entry at 00:30 UTC |
 | 11 — Mission Control migration | ✅ done | `/api/finance` + `/api/finance/history` consume Pulsar correctly; top100 cards render with proper symbol+name; fees populated from per-asset `/prices/btc-fee-*` |
 
+> **Post-plan amendment (2026-05-16):** the dev/prod environment split was removed. Pulsar now runs as a single process on port `3103` reading from `prisma/pulsar.db`, configured by a single `.env` file (template: `.env.example`). All phase descriptions below predate this change — references to `.env.development`, `.env.production`, `dev.db`, `prod.db`, port `4103`, and the `pulsar-dev` PM2 entry are historical context, not current setup.
+
 ---
 
 ## How to read this plan

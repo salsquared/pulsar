@@ -7,10 +7,8 @@ build/
 .next/
 out/
 
-# Environment — never commit actual env files; copy the .example counterpart and fill in values
+# Environment — never commit the actual .env; copy .env.example and fill in values
 .env
-.env.development
-.env.production
 
 # OS
 .DS_Store
@@ -29,7 +27,7 @@ npm-debug.log*
 # Coverage
 coverage/
 
-# SQLite databases (dev.db and prod.db are untracked; WAL/SHM sidecar files too)
+# SQLite databases (pulsar.db untracked; WAL/SHM sidecar files too)
 prisma/*.db
 prisma/*.db-wal
 prisma/*.db-shm

@@ -4,7 +4,7 @@
 import { execSync } from 'node:child_process'
 import WebSocket from 'ws'
 
-const ws = new WebSocket('ws://localhost:4103/ws/prices')
+const ws = new WebSocket('ws://localhost:3103/ws/prices')
 let tickReceived = false
 
 ws.on('open', () => {
@@ -41,7 +41,7 @@ setTimeout(() => {
   console.log('[test] triggering coingecko ingest...')
   try {
     execSync(
-      'node --env-file .env.development --import tsx/esm src/ingest/run.ts',
+      'node --env-file .env --import tsx/esm src/ingest/run.ts',
       { env: { ...process.env, SOURCE_ID: 'coingecko' }, stdio: 'pipe', timeout: 20_000 },
     )
   } catch (err) {

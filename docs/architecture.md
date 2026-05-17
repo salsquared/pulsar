@@ -2,7 +2,7 @@
 
 ## Overview
 
-Pulsar is a dedicated financial data ingest and storage service within the `salsquared` ecosystem. It runs as a standalone backend (not a Next.js app) at **port 3103** (prod) / **4103** (dev), with its database reserved at **8103** (prod) / **8203** (dev).
+Pulsar is a dedicated financial data ingest and storage service within the `salsquared` ecosystem. It runs as a standalone backend (not a Next.js app) at **port 3103**, with its database port reserved at **8103** for a future Postgres/Timescale migration.
 
 Its job is to own all financial data: fetch it on a schedule from external APIs, normalize it into a consistent local schema, persist it, and expose it via a clean REST API. Mission Control and other internal consumers replace their direct external API calls with calls to Pulsar.
 
@@ -20,7 +20,7 @@ This separates concerns clearly:
 | Language | TypeScript | Consistent with ecosystem |
 | Framework | **Hono** | Fast, TypeScript-native, minimal overhead for a backend service |
 | ORM | **Prisma** | Consistent with Mission Control; good migration tooling |
-| Database | **SQLite** (file-based) | Consistent with ecosystem; ports 8103/8203 reserved for future PostgreSQL migration |
+| Database | **SQLite** (file-based) | Consistent with ecosystem; port 8103 reserved for future PostgreSQL migration |
 | Process Manager | **PM2** | Already used ecosystem-wide via `ecosystem.config.cjs`; `cron_restart` drives ingest scheduling |
 | Package Manager | npm | Consistent with ecosystem |
 
@@ -364,7 +364,7 @@ This bounds SQLite growth: at ~5 active sources averaging ~50 ticks/min combined
 
 ## REST API
 
-Base URL: `http://localhost:3103/api` (prod) / `http://localhost:4103/api` (dev)
+Base URL: `http://localhost:3103/api`
 
 ### Endpoints
 
@@ -819,21 +819,13 @@ Migration path:
 Add to `/Users/sal/salsquared/ecosystem.config.cjs`:
 
 ```javascript
-// API server — prod
+// API server
 {
   name: "pulsar",
   cwd: "/Users/sal/salsquared/pulsar",
   script: "npm",
   args: "run start",
   env: { PORT: 3103, NODE_ENV: "production" }
-},
-// API server — dev
-{
-  name: "pulsar-dev",
-  cwd: "/Users/sal/salsquared/pulsar",
-  script: "npm",
-  args: "run dev",
-  env: { PORT: 4103, NODE_ENV: "development" }
 },
 
 // Ingest jobs — one entry per source, scheduled via cron_restart
@@ -986,10 +978,8 @@ pulsar/
 ├── scripts/                  # one-off scripts (backfills, DB inspection) run via `npx tsx`
 ├── docs/
 │   └── architecture.md       # this file
-├── .env.development          # gitignored — copy from .env.development.example
-├── .env.production           # gitignored — copy from .env.production.example
-├── .env.development.example  # committed template for dev (DATABASE_URL + dev API keys)
-├── .env.production.example   # committed template for prod (DATABASE_URL + prod API keys)
+├── .env                      # gitignored — copy from .env.example
+├── .env.example              # committed template (DATABASE_URL + API keys + PULSAR_INTERNAL_TOKEN)
 ├── package.json
 └── tsconfig.json
 ```
@@ -998,8 +988,8 @@ pulsar/
 
 ## Open Questions / Future Considerations
 
-- **PostgreSQL migration:** Ports 8103/8203 are reserved. TimescaleDB (PostgreSQL extension) is well-suited for the `price_ticks` table once volume outgrows SQLite's comfortable working set. The migration is mostly a Prisma datasource change plus a one-time data copy; the schema is portable as-is.
+- **PostgreSQL migration:** Port 8103 is reserved. TimescaleDB (PostgreSQL extension) is well-suited for the `price_ticks` table once volume outgrows SQLite's comfortable working set. The migration is mostly a Prisma datasource change plus a one-time data copy; the schema is portable as-is.
 - **Alerting:** Hook into `IngestJob.status = FAILED` rows (or repeated failures across N runs) to push a notification — e.g., into Mission Control's internal systems dash, or via webhook to Discord/Slack. Today the only signal is `pm2 logs` and the IngestJob table.
 - **Observability:** Add a Prometheus `/metrics` endpoint (job duration histograms, rows-inserted counters, cache hit rate, WS client count). Cheap to add once the service is running.
 - **Shared TypeScript client SDK:** Publish a small `@salsquared/pulsar-client` package (or a workspace-internal one) so Mission Control gets typed responses without redefining `NormalizedTick` / response shapes locally. Defer until the API surface stabilizes.
-- **Backups:** Periodic `sqlite3 .backup` of `prod.db` to an off-host location. Easy to add once the data is load-bearing for Mission Control.
+- **Backups:** Periodic `sqlite3 .backup` of `pulsar.db` to an off-host location. Easy to add once the data is load-bearing for Mission Control.

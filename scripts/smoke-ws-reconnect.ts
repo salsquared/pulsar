@@ -5,7 +5,7 @@ let initialSession: string | null = null
 let reconnectedSession: string | null = null
 
 function connect() {
-  const ws = new WebSocket('ws://localhost:4103/ws/prices')
+  const ws = new WebSocket('ws://localhost:3103/ws/prices')
   ws.on('open', () => { ws.send(JSON.stringify({ type: 'subscribe', assetIds: ['bitcoin'] })) })
   ws.on('message', (data) => {
     const msg = JSON.parse(data.toString())
